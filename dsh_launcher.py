@@ -911,7 +911,7 @@ class DSHLauncher:
         footer.pack_propagate(False)
         tk.Label(footer, text=f"  DeepSeek Harness 一键启动器  ·  关闭窗口后常驻系统托盘  ·  {APP_VERSION}",
             font=F_TINY, bg=C_BOTTOM, fg=C_TEXT3).pack(side=tk.LEFT, pady=5)
-        tk.Label(footer, text=f"  {APP_VERSION}  ", font=F_TINY, bg=C_BOTTOM, fg=C_TEXT3).pack(side=tk.RIGHT, pady=5)
+
 
     # ============================================================
     # 辅助
