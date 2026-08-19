@@ -1,5 +1,14 @@
 # 更新日志
 
+## [v3.1] - 2026-08-19
+
+### 修复
+- 已安装插件检测：改为只读 package.json 的 dependencies（真实安装成功记录），不再误解析 cordis.patch.yml 注释（之前会把 Your/a/overrides 等英文单词误判为插件）
+- 卸载幽灵残留：当 pnpm 找不到依赖时，直接编辑 package.json 从 bundles 中移除残留（解决"卸载不掉"）
+- 安装失败残留：安装失败时自动清理可能写入 bundles 的幽灵条目
+- npx 命令补充 -y 标志，避免交互确认卡住
+- 增强 PATH 探测：显式加入系统 node、便携版 node、npm 全局目录
+
 ## [v3.0] - 2026-08-19
 
 ### 新增

@@ -44,7 +44,7 @@ except ImportError:
 # 配置
 # ============================================================
 APP_TITLE = "DeepSeek Harness — 一键启动器"
-APP_VERSION = "v3.0"
+APP_VERSION = "v3.1"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dsh_launcher_config.json")
 
 # 配色
@@ -648,36 +648,73 @@ class DSHLauncher:
         threading.Thread(target=self._do_install, args=(name,), daemon=True).start()
 
     def _get_enhanced_env(self):
-        """获取增强的 PATH 环境变量，确保 pnpm 可被找到"""
+        """获取增强的 PATH 环境变量，确保 node / npm / npx / pnpm 均可被找到
+
+        dsh 的 plugin 命令内部通过 spawnSync('pnpm', {shell:true}) 在 cmd.exe 中
+        调用 pnpm，而 pnpm.cmd 又依赖 PATH 中的 node。双击 exe 启动时进程继承的
+        是系统+用户 PATH，通常不包含 npm 全局目录(~/.npm-global)和便携版 node，
+        因此必须显式把这些目录前置到 PATH。
+        """
         env = os.environ.copy()
         extra_paths = []
+        candidates = []
 
-        # 1. 检查常见 npm 全局目录
-        candidates = [
-            os.path.expanduser('~/.npm-global'),
-            os.path.expanduser('~/AppData/Roaming/npm'),
+        # 1. 常见 node/npm/pnpm 安装位置（静态候选）
+        candidates += [
+            os.path.expanduser('~/.npm-global'),            # npm 全局 prefix（pnpm.cmd 在这）
+            os.path.expanduser('~/AppData/Roaming/npm'),    # 备用 npm 全局目录
+            os.path.expanduser('~/AppData/Local/pnpm'),     # pnpm standalone 安装位置
             os.path.join(os.environ.get('APPDATA', ''), 'npm'),
+            r'C:\Program Files\nodejs',                    # 系统 node（node/npm/npx/corepack）
+            r'C:\Program Files (x86)\nodejs',              # 32 位系统 node
         ]
-        # 2. 尝试 npm prefix -g
+
+        # 2. 探测便携版 node（WPS 灵犀等自带 node 环境）
+        for _portable_root in [
+            os.path.expanduser('~/AppData/Roaming/WPS 灵犀/portable-node'),
+            os.path.expanduser('~/AppData/Roaming/WPS Office/portable-node'),
+            os.path.expanduser('~/scoop/apps/nodejs/current'),
+            os.path.expanduser('~/scoop/apps/pnpm/current'),
+        ]:
+            try:
+                if _portable_root and os.path.isdir(_portable_root):
+                    # 若是 node 目录本身则直接加入，否则遍历子目录找 node.exe
+                    if os.path.exists(os.path.join(_portable_root, 'node.exe')):
+                        candidates.append(_portable_root)
+                    else:
+                        for _sub in os.listdir(_portable_root):
+                            _p = os.path.join(_portable_root, _sub)
+                            if os.path.exists(os.path.join(_p, 'node.exe')):
+                                candidates.append(_p)
+                                break
+            except Exception:
+                pass
+
+        # 3. 动态获取 npm 全局 prefix（最权威的 pnpm 安装位置）
         try:
             result = subprocess.run('npm prefix -g', shell=True, capture_output=True,
                 text=True, encoding='utf-8', errors='replace', timeout=5)
-            if result.returncode == 0:
-                p = result.stdout.strip()
-                if p:
-                    candidates.append(p)
+            if result.returncode == 0 and result.stdout.strip():
+                candidates.insert(0, result.stdout.strip())
         except Exception:
             pass
 
-        # 3. 验证哪些目录确实包含 pnpm
+        # 4. 只保留确实含关键可执行文件的目录（去重、保序）
+        _seen = set()
         for c in candidates:
-            if c and os.path.exists(os.path.join(c, 'pnpm.cmd')):
+            if not c:
+                continue
+            c = os.path.normpath(c)
+            if c in _seen:
+                continue
+            has_pnpm = os.path.exists(os.path.join(c, 'pnpm.cmd')) or \
+                       os.path.exists(os.path.join(c, 'pnpm.exe'))
+            has_node = os.path.exists(os.path.join(c, 'node.exe'))
+            has_npm = os.path.exists(os.path.join(c, 'npm.cmd')) or \
+                      os.path.exists(os.path.join(c, 'npm'))
+            if has_pnpm or has_node or has_npm:
                 extra_paths.append(c)
-
-        # 4. 也检查 pnpm 自身安装路径
-        pnpm_home = os.path.expanduser('~/AppData/Local/pnpm')
-        if os.path.exists(pnpm_home):
-            extra_paths.append(pnpm_home)
+                _seen.add(c)
 
         if extra_paths:
             env['PATH'] = os.pathsep.join(extra_paths) + os.pathsep + env.get('PATH', '')
@@ -690,7 +727,7 @@ class DSHLauncher:
             dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
 
             # 方法1: dsh plugin add
-            cmd = f'npx @deepseek-ai/dsh plugin --profile web add {name}'
+            cmd = f'npx -y @deepseek-ai/dsh plugin --profile web add {name}'
             self.root.after(0, self.log, f"执行: {cmd}", "dim")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=120, env=env)
@@ -724,6 +761,8 @@ class DSHLauncher:
 
             # 两种方法都失败
             self.installing_plugins.discard(name)
+            # 清理 dsh plugin add 失败时可能写入 bundles 的幽灵残留
+            self._clean_ghost_from_package_json(name)
             self.root.after(0, self.log, f"✗ 插件安装失败: {name}", "err")
             for line in (output + '\n' + output2).split('\n')[:5]:
                 line = line.strip()
@@ -786,7 +825,7 @@ class DSHLauncher:
             dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
 
             # 方法1: dsh plugin remove
-            cmd = f'npx @deepseek-ai/dsh plugin --profile web remove {name}'
+            cmd = f'npx -y @deepseek-ai/dsh plugin --profile web remove {name}'
             self.root.after(0, self.log, f"执行: {cmd}", "dim")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=60, env=env)
@@ -818,7 +857,18 @@ class DSHLauncher:
                 self.root.after(0, self._update_installed_count)
                 return
 
-            # 两种方法都失败
+            # 方法3: 清理幽灵残留（bundles 里有但 dependencies 没有，pnpm 找不到依赖）
+            self.root.after(0, self.log, "pnpm 找不到该依赖，检查是否为安装失败的残留...", "dim")
+            if self._clean_ghost_from_package_json(name):
+                self.installed_plugins.discard(name)
+                self.installing_plugins.discard(name)
+                self.save_config()
+                self.root.after(0, self.log, f"✓ 已清理残留插件: {name}", "ok")
+                self.root.after(0, self._render_plugins)
+                self.root.after(0, self._update_installed_count)
+                return
+
+            # 三种方法都失败
             self.installing_plugins.discard(name)
             self.root.after(0, self.log, f"✗ 插件卸载失败: {name}", "err")
             for line in (output + '\n' + output2).split('\n')[:5]:
@@ -835,6 +885,41 @@ class DSHLauncher:
             self.root.after(0, self.log, f"✗ 卸载出错: {e}", "err")
             self.root.after(0, self._render_plugins)
 
+    def _clean_ghost_from_package_json(self, name):
+        """清理幽灵残留：插件名在 bundles/dependencies 里但实际未安装成功
+
+        当 pnpm add 因 peer 依赖冲突等原因失败时，dsh 仍可能把插件名写入
+        dsh.profile.bundles，导致 bundles 有、dependencies 与 node_modules 都无。
+        此时 pnpm remove 会报 ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS。
+        该方法直接编辑 package.json，把该名字从 bundles 和 dependencies 移除。
+        返回 True 表示确实清理了内容。
+        """
+        try:
+            pkg_file = os.path.expanduser('~/.dsh/profiles/web/package.json')
+            if not os.path.exists(pkg_file):
+                return False
+            with open(pkg_file, 'r', encoding='utf-8') as f:
+                pkg = json.load(f)
+
+            changed = False
+            # 从 dsh.profile.bundles 移除
+            bundles = pkg.get('dsh', {}).get('profile', {}).get('bundles')
+            if isinstance(bundles, list) and name in bundles:
+                pkg['dsh']['profile']['bundles'] = [b for b in bundles if b != name]
+                changed = True
+            # 从 dependencies 移除
+            deps = pkg.get('dependencies')
+            if isinstance(deps, dict) and name in deps:
+                deps.pop(name, None)
+                changed = True
+
+            if changed:
+                with open(pkg_file, 'w', encoding='utf-8') as f:
+                    json.dump(pkg, f, ensure_ascii=False, indent=2)
+            return changed
+        except Exception:
+            return False
+
     def _reset_plugin_btn(self, name, is_installed):
         """恢复插件按钮状态"""
         if name not in self.plugin_cards:
@@ -850,52 +935,35 @@ class DSHLauncher:
         self.installed_count_label.configure(text=f"已安装: {len(self.installed_plugins)}")
 
     def _detect_installed(self):
-        """检测已安装的插件 — 从 cordis.patch.yml + pnpm list + 配置文件综合检测"""
+        """检测已安装的插件 — 以 package.json 的 dependencies 为准
+
+        dsh 的 plugin add 底层执行 pnpm add，成功后才把插件写入
+        ~/.dsh/profiles/web/package.json 的 dependencies。
+
+        注意：dsh.profile.bundles 不可靠——当 pnpm add 因 peer 依赖冲突等
+        原因失败时，dsh 仍可能把插件名写入 bundles，造成"幽灵残留"（bundles
+        有、dependencies 与 node_modules 都无）。因此只以 dependencies 作为
+        已安装依据，cordis.patch.yml 也始终是用户手动 patch 层（[]）。
+        """
         try:
-            # 方法1: 解析 cordis.patch.yml（dsh 插件安装的真正位置）
-            patch_file = os.path.expanduser('~/.dsh/profiles/web/cordis.patch.yml')
-            if os.path.exists(patch_file):
-                with open(patch_file, 'r', encoding='utf-8') as f:
-                    content = f.read().strip()
-                if content and content != '[]':
-                    # 尝试提取插件名（YAML 格式，查找 insert/add 条目中的包名）
-                    for line in content.split('\n'):
-                        line = line.strip()
-                        # 匹配 npm 包名格式
-                        m = re.search(r'(@?[\w][\w.-]*/[\w][\w.-]*|@?[\w][\w.-]*)', line)
-                        if m:
-                            pkg = m.group(1)
-                            if not pkg.startswith('@deepseek-ai/') and not pkg.startswith('#'):
-                                self.installed_plugins.add(pkg)
+            pkg_file = os.path.expanduser('~/.dsh/profiles/web/package.json')
+            framework_pkgs = {'@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'}
 
-            # 方法2: 用 pnpm list 检测（需要完整路径）
-            try:
-                pnpm_path = os.path.join(os.path.expanduser('~/.npm-global'), 'pnpm.cmd')
-                if not os.path.exists(pnpm_path):
-                    # 尝试 npm prefix -g 获取路径
-                    r = subprocess.run('npm prefix -g', shell=True, capture_output=True,
-                        text=True, encoding='utf-8', errors='replace', timeout=5)
-                    if r.returncode == 0:
-                        pnpm_path = os.path.join(r.stdout.strip(), 'pnpm.cmd')
+            if os.path.exists(pkg_file):
+                with open(pkg_file, 'r', encoding='utf-8') as f:
+                    pkg = json.load(f)
 
-                if os.path.exists(pnpm_path):
-                    dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
-                    result = subprocess.run(
-                        [pnpm_path, 'list', '--depth', '0', '--json'],
-                        cwd=dsh_dir, capture_output=True, text=True,
-                        encoding='utf-8', errors='replace', timeout=15)
-                    if result.returncode == 0:
-                        data = json.loads(result.stdout)
-                        if data and isinstance(data, list):
-                            deps = data[0].get('dependencies', {})
-                            for dep_name in deps:
-                                if not dep_name.startswith('@deepseek-ai/'):
-                                    self.installed_plugins.add(dep_name)
-            except Exception:
-                pass
+                detected = set()
+                # 仅以 dependencies 为准（pnpm add 的真实成功结果）
+                deps = pkg.get('dependencies', {})
+                if isinstance(deps, dict):
+                    for name in deps:
+                        if name not in framework_pkgs:
+                            detected.add(name)
 
-            # 方法3: 配置文件中已记录的（由本启动器安装的）
-            # installed_plugins 已在 load_config 中加载
+                # 以 package.json 为权威，覆盖 config 中的旧记录（避免幽灵/已卸载插件仍显示已安装）
+                self.installed_plugins = detected
+            # 若 package.json 不存在，保留 config 已加载的记录
 
             # 保存并更新 UI
             self.save_config()
@@ -903,8 +971,8 @@ class DSHLauncher:
                 self.root.after(0, self.log, f"检测到 {len(self.installed_plugins)} 个已安装插件", "info")
             self.root.after(0, self._update_installed_count)
             self.root.after(0, self._render_plugins)
-        except Exception:
-            pass
+        except Exception as e:
+            self.root.after(0, self.log, f"检测已安装插件出错: {e}", "err")
 
     def _refresh_plugins(self):
         """刷新插件列表 — 从 npm 搜索最新插件"""
