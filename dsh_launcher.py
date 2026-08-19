@@ -183,7 +183,7 @@ class DSHLauncher:
     # 配置
     # ============================================================
     def load_config(self):
-        defaults = {'port': '3080', 'auto_open_browser': True, 'hide_to_tray': True}
+        defaults = {'port': '3080', 'auto_open_browser': True, 'hide_to_tray': True, 'installed_plugins': []}
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -193,6 +193,7 @@ class DSHLauncher:
         self.port_var = tk.StringVar(value=defaults['port'])
         self.auto_browser_var = tk.BooleanVar(value=defaults['auto_open_browser'])
         self.hide_tray_var = tk.BooleanVar(value=defaults['hide_to_tray'])
+        self.installed_plugins = set(defaults.get('installed_plugins', []))
 
     def save_config(self):
         try:
@@ -200,7 +201,8 @@ class DSHLauncher:
                 json.dump({
                     'port': self.port_var.get(),
                     'auto_open_browser': self.auto_browser_var.get(),
-                    'hide_to_tray': self.hide_tray_var.get()
+                    'hide_to_tray': self.hide_tray_var.get(),
+                    'installed_plugins': list(self.installed_plugins)
                 }, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
@@ -672,6 +674,7 @@ class DSHLauncher:
             if result.returncode == 0:
                 self.installed_plugins.add(name)
                 self.installing_plugins.discard(name)
+                self.save_config()
                 self.root.after(0, self.log, f"✓ 插件安装成功: {name}", "ok")
                 self.root.after(0, self._render_plugins)
                 self.root.after(0, self._update_installed_count)
@@ -746,6 +749,7 @@ class DSHLauncher:
             if result.returncode == 0:
                 self.installed_plugins.discard(name)
                 self.installing_plugins.discard(name)
+                self.save_config()
                 self.root.after(0, self.log, f"✓ 插件已卸载: {name}", "ok")
                 self.root.after(0, self._render_plugins)
                 self.root.after(0, self._update_installed_count)
@@ -782,51 +786,61 @@ class DSHLauncher:
         self.installed_count_label.configure(text=f"已安装: {len(self.installed_plugins)}")
 
     def _detect_installed(self):
-        """检测已安装的插件 — 从 dsh profile 目录读取已装插件"""
+        """检测已安装的插件 — 从 cordis.patch.yml + pnpm list + 配置文件综合检测"""
         try:
-            env = self._get_enhanced_env()
-            # 方法1: 尝试 dsh plugin list 命令
-            cmd = 'npx @deepseek-ai/dsh plugin --profile web list'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                encoding='utf-8', errors='replace', timeout=30, env=env)
-            output = (result.stdout + result.stderr).strip()
-            if result.returncode == 0 and output:
-                for line in output.split('\n'):
-                    line = line.strip()
-                    if not line or line.startswith('#') or line.startswith('No '):
-                        continue
-                    # 提取 npm 包名格式: @scope/name 或 name
-                    m = re.match(r'^(?:\s*[-*•]\s*)?(@?[\w.-]+/[\w.-]+|@?[\w][\w.-]*)', line)
-                    if m:
-                        pkg = m.group(1).strip()
-                        # 去掉版本号
-                        pkg = re.sub(r'@\d+\.\d+.*$', '', pkg)
-                        if pkg and not pkg.startswith('@deepseek-ai/'):
-                            self.installed_plugins.add(pkg)
+            # 方法1: 解析 cordis.patch.yml（dsh 插件安装的真正位置）
+            patch_file = os.path.expanduser('~/.dsh/profiles/web/cordis.patch.yml')
+            if os.path.exists(patch_file):
+                with open(patch_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                if content and content != '[]':
+                    # 尝试提取插件名（YAML 格式，查找 insert/add 条目中的包名）
+                    for line in content.split('\n'):
+                        line = line.strip()
+                        # 匹配 npm 包名格式
+                        m = re.search(r'(@?[\w][\w.-]*/[\w][\w.-]*|@?[\w][\w.-]*)', line)
+                        if m:
+                            pkg = m.group(1)
+                            if not pkg.startswith('@deepseek-ai/') and not pkg.startswith('#'):
+                                self.installed_plugins.add(pkg)
 
-            # 方法2: 扫描 .dsh/profiles/web 目录下的 node_modules
-            dsh_dir = os.path.expanduser('~/.dsh/profiles/web/node_modules')
-            if os.path.isdir(dsh_dir):
-                for entry in os.listdir(dsh_dir):
-                    if entry.startswith('.') or entry.startswith('@deepseek-ai'):
-                        continue
-                    if entry.startswith('@'):
-                        # scoped package: 检查子目录
-                        sub = os.path.join(dsh_dir, entry)
-                        if os.path.isdir(sub):
-                            for sub_entry in os.listdir(sub):
-                                full = f"{entry}/{sub_entry}"
-                                if not sub_entry.startswith('.') and full not in self.installed_plugins:
-                                    self.installed_plugins.add(full)
-                    else:
-                        self.installed_plugins.add(entry)
+            # 方法2: 用 pnpm list 检测（需要完整路径）
+            try:
+                pnpm_path = os.path.join(os.path.expanduser('~/.npm-global'), 'pnpm.cmd')
+                if not os.path.exists(pnpm_path):
+                    # 尝试 npm prefix -g 获取路径
+                    r = subprocess.run('npm prefix -g', shell=True, capture_output=True,
+                        text=True, encoding='utf-8', errors='replace', timeout=5)
+                    if r.returncode == 0:
+                        pnpm_path = os.path.join(r.stdout.strip(), 'pnpm.cmd')
 
+                if os.path.exists(pnpm_path):
+                    dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
+                    result = subprocess.run(
+                        [pnpm_path, 'list', '--depth', '0', '--json'],
+                        cwd=dsh_dir, capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=15)
+                    if result.returncode == 0:
+                        data = json.loads(result.stdout)
+                        if data and isinstance(data, list):
+                            deps = data[0].get('dependencies', {})
+                            for dep_name in deps:
+                                if not dep_name.startswith('@deepseek-ai/'):
+                                    self.installed_plugins.add(dep_name)
+            except Exception:
+                pass
+
+            # 方法3: 配置文件中已记录的（由本启动器安装的）
+            # installed_plugins 已在 load_config 中加载
+
+            # 保存并更新 UI
+            self.save_config()
             if self.installed_plugins:
                 self.root.after(0, self.log, f"检测到 {len(self.installed_plugins)} 个已安装插件", "info")
-                self.root.after(0, self._update_installed_count)
-                self.root.after(0, self._render_plugins)
-        except Exception as e:
-            pass  # 静默失败
+            self.root.after(0, self._update_installed_count)
+            self.root.after(0, self._render_plugins)
+        except Exception:
+            pass
 
     def _refresh_plugins(self):
         """刷新插件列表 — 从 npm 搜索最新插件"""
