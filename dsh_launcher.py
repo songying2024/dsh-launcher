@@ -648,23 +648,48 @@ class DSHLauncher:
         threading.Thread(target=self._do_install, args=(name,), daemon=True).start()
 
     def _get_enhanced_env(self):
-        """获取增强的 PATH 环境变量，包含 npm 全局目录"""
+        """获取增强的 PATH 环境变量，确保 pnpm 可被找到"""
         env = os.environ.copy()
+        extra_paths = []
+
+        # 1. 检查常见 npm 全局目录
+        candidates = [
+            os.path.expanduser('~/.npm-global'),
+            os.path.expanduser('~/AppData/Roaming/npm'),
+            os.path.join(os.environ.get('APPDATA', ''), 'npm'),
+        ]
+        # 2. 尝试 npm prefix -g
         try:
-            # 获取 npm 全局 prefix
             result = subprocess.run('npm prefix -g', shell=True, capture_output=True,
                 text=True, encoding='utf-8', errors='replace', timeout=5)
             if result.returncode == 0:
-                npm_global = result.stdout.strip()
-                if npm_global and npm_global not in env.get('PATH', ''):
-                    env['PATH'] = npm_global + os.pathsep + env.get('PATH', '')
+                p = result.stdout.strip()
+                if p:
+                    candidates.append(p)
         except Exception:
             pass
+
+        # 3. 验证哪些目录确实包含 pnpm
+        for c in candidates:
+            if c and os.path.exists(os.path.join(c, 'pnpm.cmd')):
+                extra_paths.append(c)
+
+        # 4. 也检查 pnpm 自身安装路径
+        pnpm_home = os.path.expanduser('~/AppData/Local/pnpm')
+        if os.path.exists(pnpm_home):
+            extra_paths.append(pnpm_home)
+
+        if extra_paths:
+            env['PATH'] = os.pathsep.join(extra_paths) + os.pathsep + env.get('PATH', '')
+
         return env
 
     def _do_install(self, name):
         try:
             env = self._get_enhanced_env()
+            dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
+
+            # 方法1: dsh plugin add
             cmd = f'npx @deepseek-ai/dsh plugin --profile web add {name}'
             self.root.after(0, self.log, f"执行: {cmd}", "dim")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
@@ -678,19 +703,37 @@ class DSHLauncher:
                 self.root.after(0, self.log, f"✓ 插件安装成功: {name}", "ok")
                 self.root.after(0, self._render_plugins)
                 self.root.after(0, self._update_installed_count)
-            else:
+                return
+
+            # 方法2: pnpm add 直接在 profile 目录执行
+            self.root.after(0, self.log, "dsh 命令失败，尝试 pnpm 直接安装...", "dim")
+            pnpm_cmd = f'pnpm add {name}'
+            self.root.after(0, self.log, f"执行: {pnpm_cmd} (cwd={dsh_dir})", "dim")
+            result2 = subprocess.run(pnpm_cmd, shell=True, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=120, env=env, cwd=dsh_dir)
+            output2 = (result2.stdout + result2.stderr).strip()
+
+            if result2.returncode == 0:
+                self.installed_plugins.add(name)
                 self.installing_plugins.discard(name)
-                self.root.after(0, self.log, f"✗ 插件安装失败: {name}", "err")
-                if output:
-                    for line in output.split('\n')[:5]:
-                        line = line.strip()
-                        if line:
-                            self.root.after(0, self.log, f"  {line}", "dim")
-                if 'pnpm' in output.lower() or 'pnpm' in str(result.stderr).lower():
-                    self.root.after(0, self.log, "提示: 缺少 pnpm，正在自动安装...", "info")
-                    self._auto_install_pnpm(name, is_install=True)
-                    return
+                self.save_config()
+                self.root.after(0, self.log, f"✓ 插件安装成功: {name}", "ok")
                 self.root.after(0, self._render_plugins)
+                self.root.after(0, self._update_installed_count)
+                return
+
+            # 两种方法都失败
+            self.installing_plugins.discard(name)
+            self.root.after(0, self.log, f"✗ 插件安装失败: {name}", "err")
+            for line in (output + '\n' + output2).split('\n')[:5]:
+                line = line.strip()
+                if line:
+                    self.root.after(0, self.log, f"  {line}", "dim")
+            if 'pnpm' in (output + output2).lower():
+                self.root.after(0, self.log, "提示: 缺少 pnpm，正在自动安装...", "info")
+                self._auto_install_pnpm(name, is_install=True)
+                return
+            self.root.after(0, self._render_plugins)
         except subprocess.TimeoutExpired:
             self.installing_plugins.discard(name)
             self.root.after(0, self.log, f"✗ 安装超时(120s): {name}", "err")
@@ -740,6 +783,9 @@ class DSHLauncher:
     def _do_uninstall(self, name):
         try:
             env = self._get_enhanced_env()
+            dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
+
+            # 方法1: dsh plugin remove
             cmd = f'npx @deepseek-ai/dsh plugin --profile web remove {name}'
             self.root.after(0, self.log, f"执行: {cmd}", "dim")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
@@ -753,19 +799,37 @@ class DSHLauncher:
                 self.root.after(0, self.log, f"✓ 插件已卸载: {name}", "ok")
                 self.root.after(0, self._render_plugins)
                 self.root.after(0, self._update_installed_count)
-            else:
+                return
+
+            # 方法2: pnpm remove 直接在 profile 目录执行
+            self.root.after(0, self.log, "dsh 命令失败，尝试 pnpm 直接卸载...", "dim")
+            pnpm_cmd = f'pnpm remove {name}'
+            self.root.after(0, self.log, f"执行: {pnpm_cmd} (cwd={dsh_dir})", "dim")
+            result2 = subprocess.run(pnpm_cmd, shell=True, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=60, env=env, cwd=dsh_dir)
+            output2 = (result2.stdout + result2.stderr).strip()
+
+            if result2.returncode == 0:
+                self.installed_plugins.discard(name)
                 self.installing_plugins.discard(name)
-                self.root.after(0, self.log, f"✗ 插件卸载失败: {name}", "err")
-                if output:
-                    for line in output.split('\n')[:5]:
-                        line = line.strip()
-                        if line:
-                            self.root.after(0, self.log, f"  {line}", "dim")
-                if 'pnpm' in output.lower():
-                    self.root.after(0, self.log, "提示: 缺少 pnpm，正在自动安装...", "info")
-                    self._auto_install_pnpm(name, is_install=False)
-                    return
+                self.save_config()
+                self.root.after(0, self.log, f"✓ 插件已卸载: {name}", "ok")
                 self.root.after(0, self._render_plugins)
+                self.root.after(0, self._update_installed_count)
+                return
+
+            # 两种方法都失败
+            self.installing_plugins.discard(name)
+            self.root.after(0, self.log, f"✗ 插件卸载失败: {name}", "err")
+            for line in (output + '\n' + output2).split('\n')[:5]:
+                line = line.strip()
+                if line:
+                    self.root.after(0, self.log, f"  {line}", "dim")
+            if 'pnpm' in (output + output2).lower():
+                self.root.after(0, self.log, "提示: 缺少 pnpm，正在自动安装...", "info")
+                self._auto_install_pnpm(name, is_install=False)
+                return
+            self.root.after(0, self._render_plugins)
         except Exception as e:
             self.installing_plugins.discard(name)
             self.root.after(0, self.log, f"✗ 卸载出错: {e}", "err")
