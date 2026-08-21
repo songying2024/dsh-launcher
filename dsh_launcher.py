@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-DeepSeek Harness 一键启动器 v3.0 — 标签页 + 插件管理
+DeepSeek Harness 一键启动器 v3.3 — 标签页 + 插件管理
 基于官网 https://www.deepseek.com/harness/ 开发
-核心命令: npx @deepseek-ai/dsh web --port 3080
+核心命令: dsh web --port 3080 --no-open
 """
 
 import tkinter as tk
@@ -44,7 +44,7 @@ except ImportError:
 # 配置
 # ============================================================
 APP_TITLE = "DeepSeek Harness — 一键启动器"
-APP_VERSION = "v3.2"
+APP_VERSION = "v3.3"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dsh_launcher_config.json")
 
 # 配色
@@ -1099,12 +1099,12 @@ class DSHLauncher:
         self.save_config()
         self.start_btn.configure(state=tk.DISABLED, bg=C_TEXT3)
         self.log(f"工作目录: {os.path.dirname(os.path.abspath(__file__))}", "dim")
-        self.log(f"正在启动: dsh web --port {port}", "info")
+        self.log(f"正在启动: dsh web --port {port} --no-open", "info")
         threading.Thread(target=self._run_process, args=(port,), daemon=True).start()
 
     def _run_process(self, port):
         try:
-            cmd = f'dsh web --port {port}'
+            cmd = f'dsh web --port {port} --no-open'
             self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE, text=True, bufsize=1, encoding='utf-8', errors='replace',
                 shell=True, env=self._get_enhanced_env())
