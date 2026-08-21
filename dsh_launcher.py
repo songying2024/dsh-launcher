@@ -44,7 +44,7 @@ except ImportError:
 # 配置
 # ============================================================
 APP_TITLE = "DeepSeek Harness — 一键启动器"
-APP_VERSION = "v3.1"
+APP_VERSION = "v3.2"
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dsh_launcher_config.json")
 
 # 配色
@@ -727,7 +727,7 @@ class DSHLauncher:
             dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
 
             # 方法1: dsh plugin add
-            cmd = f'npx -y @deepseek-ai/dsh plugin --profile web add {name}'
+            cmd = f'dsh plugin --profile web add {name}'
             self.root.after(0, self.log, f"执行: {cmd}", "dim")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=120, env=env)
@@ -825,7 +825,7 @@ class DSHLauncher:
             dsh_dir = os.path.expanduser('~/.dsh/profiles/web')
 
             # 方法1: dsh plugin remove
-            cmd = f'npx -y @deepseek-ai/dsh plugin --profile web remove {name}'
+            cmd = f'dsh plugin --profile web remove {name}'
             self.root.after(0, self.log, f"执行: {cmd}", "dim")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=60, env=env)
@@ -1099,14 +1099,15 @@ class DSHLauncher:
         self.save_config()
         self.start_btn.configure(state=tk.DISABLED, bg=C_TEXT3)
         self.log(f"工作目录: {os.path.dirname(os.path.abspath(__file__))}", "dim")
-        self.log(f"正在启动: npx @deepseek-ai/dsh web --port {port}", "info")
+        self.log(f"正在启动: dsh web --port {port}", "info")
         threading.Thread(target=self._run_process, args=(port,), daemon=True).start()
 
     def _run_process(self, port):
         try:
-            cmd = f'npx @deepseek-ai/dsh web --port {port}'
+            cmd = f'dsh web --port {port}'
             self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                stdin=subprocess.PIPE, text=True, bufsize=1, encoding='utf-8', errors='replace', shell=True)
+                stdin=subprocess.PIPE, text=True, bufsize=1, encoding='utf-8', errors='replace',
+                shell=True, env=self._get_enhanced_env())
             self.is_running = True
             self.root.after(0, self.update_status, True)
             for line in self.process.stdout:
@@ -1119,7 +1120,7 @@ class DSHLauncher:
             if ret != 0:
                 self.root.after(0, self.log, f"进程退出，返回码: {ret}", "err")
         except FileNotFoundError:
-            self.root.after(0, self.log, "未找到 npx，请先安装 Node.js", "err")
+            self.root.after(0, self.log, "未找到 dsh，请先安装 Node.js 及 DeepSeek Harness", "err")
             self.root.after(0, self.log, "下载地址: https://nodejs.org/", "dim")
             self.root.after(0, self.update_status, False)
         except Exception as e:
